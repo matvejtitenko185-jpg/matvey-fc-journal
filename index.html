@@ -1,3 +1,9 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MATVEY FC</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Oswald:wght@300;400;500;600;700&family=Inter:wght@300;400;500&display=swap');
 
@@ -314,6 +320,8 @@ body::before {
 }
 .flash.show { transform: translateX(-50%) translateY(0); }
 </style>
+</head>
+<body>
 
 <div class="wrap">
   <div class="hdr">
@@ -399,19 +407,100 @@ body::before {
 <div class="flash" id="flash"></div>
 
 <script>
-var KEY = 'matvey_fc_v3';
+/* ================================================================
+   IndexedDB — persistent storage that browsers DON'T auto-clear
+   (unlike localStorage which Safari/Chrome wipe after ~7 days)
+   ================================================================ */
+var DB_NAME = 'MatveyFC';
+var DB_VERSION = 1;
+var STORE = 'entries';
+var db = null;
+var entriesCache = [];
 
-function load() {
-  try { return JSON.parse(localStorage.getItem(KEY) || '[]'); }
-  catch(e) { return []; }
+function openDB() {
+  return new Promise(function(resolve, reject) {
+    var req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = function(e) {
+      var d = e.target.result;
+      if (!d.objectStoreNames.contains(STORE)) {
+        d.createObjectStore(STORE, { keyPath: 'id' });
+      }
+    };
+    req.onsuccess = function(e) { db = e.target.result; resolve(db); };
+    req.onerror = function(e) { reject(e); };
+  });
 }
 
-function save(arr) {
-  localStorage.setItem(KEY, JSON.stringify(arr));
+function dbGetAll() {
+  return new Promise(function(resolve, reject) {
+    var tx = db.transaction(STORE, 'readonly');
+    var store = tx.objectStore(STORE);
+    var req = store.getAll();
+    req.onsuccess = function() { resolve(req.result || []); };
+    req.onerror = function(e) { reject(e); };
+  });
 }
 
+function dbPut(entry) {
+  return new Promise(function(resolve, reject) {
+    var tx = db.transaction(STORE, 'readwrite');
+    var store = tx.objectStore(STORE);
+    var req = store.put(entry);
+    req.onsuccess = function() { resolve(); };
+    req.onerror = function(e) { reject(e); };
+  });
+}
+
+function dbClearAll() {
+  return new Promise(function(resolve, reject) {
+    var tx = db.transaction(STORE, 'readwrite');
+    var store = tx.objectStore(STORE);
+    var req = store.clear();
+    req.onsuccess = function() { resolve(); };
+    req.onerror = function(e) { reject(e); };
+  });
+}
+
+/* Migrate old localStorage data → IndexedDB (one-time) */
+async function migrateLocalStorage() {
+  try {
+    var old = localStorage.getItem('matvey_fc_v3');
+    if (!old) return;
+    var arr = JSON.parse(old);
+    if (!arr || !arr.length) return;
+    var existing = await dbGetAll();
+    if (existing.length > 0) {
+      // Already have data in IDB — just delete old key
+      localStorage.removeItem('matvey_fc_v3');
+      return;
+    }
+    for (var i = 0; i < arr.length; i++) {
+      await dbPut(arr[i]);
+    }
+    localStorage.removeItem('matvey_fc_v3');
+  } catch(e) { /* silent */ }
+}
+
+/* ===== INIT ===== */
 var selT = {};
 var selA = [];
+
+async function init() {
+  try {
+    await openDB();
+    await migrateLocalStorage();
+    var all = await dbGetAll();
+    // Sort newest first (by id = timestamp)
+    all.sort(function(a, b) { return b.id - a.id; });
+    entriesCache = all;
+  } catch(e) {
+    // Fallback to localStorage if IndexedDB unavailable
+    try { entriesCache = JSON.parse(localStorage.getItem('matvey_fc_v3') || '[]'); } catch(x) { entriesCache = []; }
+  }
+  updateStats();
+}
+
+init();
 
 /* ===== TABS ===== */
 var TABS = [
@@ -526,7 +615,7 @@ document.getElementById('btn-submit').addEventListener('click', function(e) {
   submitEntry();
 });
 
-function submitEntry() {
+async function submitEntry() {
   var day   = parseInt(document.getElementById('inp-day').value);
   var month = parseInt(document.getElementById('inp-month').value);
   var tours = Object.keys(selT).map(Number);
@@ -551,10 +640,17 @@ function submitEntry() {
     note: document.getElementById('inp-note').value.trim()
   };
 
-  var arr = load();
-  arr.unshift(entry);
-  save(arr);
+  // Save to IndexedDB
+  try {
+    if (db) { await dbPut(entry); }
+    else { /* fallback */ var arr2 = JSON.parse(localStorage.getItem('matvey_fc_v3')||'[]'); arr2.unshift(entry); localStorage.setItem('matvey_fc_v3', JSON.stringify(arr2)); }
+  } catch(e) {
+    flash('\u041e\u0428\u0418\u0411\u041a\u0410'); return;
+  }
 
+  entriesCache.unshift(entry);
+
+  // Reset form
   selT = {};
   selA = [];
   var tbtns = document.querySelectorAll('.tbtn');
@@ -571,7 +667,7 @@ function submitEntry() {
 /* ===== HISTORY ===== */
 function renderHist() {
   var list = document.getElementById('hist-list');
-  var arr  = load();
+  var arr  = entriesCache;
   if (arr.length === 0) {
     list.innerHTML = '<div class="empty"><div class="empty-ico">\u26bd</div><div class="empty-txt">\u041d\u0435\u0442 \u0437\u0430\u043f\u0438\u0441\u0435\u0439</div></div>';
     return;
@@ -620,12 +716,12 @@ function calcRange() {
   var to   = new Date(yr, m2-1, d2);
   if (to < from) { flash('\u041d\u0415\u0412\u0415\u0420\u041d\u042b\u0419 \u0414\u0418\u0410\u041f\u0410\u0417\u041e\u041d'); return; }
 
-  var all = load();
+  var arr = entriesCache;
   var filtered = [];
-  for (var i = 0; i < all.length; i++) {
-    var p = all[i].date.split('.');
+  for (var i = 0; i < arr.length; i++) {
+    var p = arr[i].date.split('.');
     var d = new Date(parseInt(p[2]), parseInt(p[1])-1, parseInt(p[0]));
-    if (d >= from && d <= to) filtered.push(all[i]);
+    if (d >= from && d <= to) filtered.push(arr[i]);
   }
 
   var sum = 0, tours = 0;
@@ -642,10 +738,12 @@ function calcRange() {
 }
 
 /* ===== CLEAR ===== */
-document.getElementById('btn-clear').addEventListener('click', function(e) {
+document.getElementById('btn-clear').addEventListener('click', async function(e) {
   e.preventDefault();
   if (confirm('\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0432\u0441\u044e \u0438\u0441\u0442\u043e\u0440\u0438\u044e?')) {
-    save([]);
+    entriesCache = [];
+    try { if (db) await dbClearAll(); } catch(x) {}
+    try { localStorage.removeItem('matvey_fc_v3'); } catch(x) {}
     renderHist();
     updateStats();
   }
@@ -653,7 +751,7 @@ document.getElementById('btn-clear').addEventListener('click', function(e) {
 
 /* ===== UTILS ===== */
 function updateStats() {
-  var arr = load();
+  var arr = entriesCache;
   var days = arr.length, tours = 0, sum = 0;
   for (var i = 0; i < arr.length; i++) {
     tours += arr[i].tournaments.length;
@@ -672,6 +770,6 @@ function flash(msg) {
   el.classList.add('show');
   setTimeout(function() { el.classList.remove('show'); }, 2000);
 }
-
-updateStats();
 </script>
+</body>
+</html>
